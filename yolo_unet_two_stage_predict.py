@@ -14,7 +14,7 @@ from pathlib import Path
 # 1. YOLOv11 检测模型
 YOLO_MODEL_PATH = r"E:\Data_Industry\Unet_wdir\2stage_wdir\best.pt"
 
-# 2. 你的UNet模型权重
+# 2. 你的UNet模型权重（和predict.py里一样）
 UNET_MODEL_PATH = r"E:\Data_Industry\膀胱癌细胞检测_文章\Unet_attention_文件\模型评估文件\last_model_1.pth"
 
 # 2.5. UNet模型版本选择
@@ -41,11 +41,8 @@ YOLO_CLASSES = [0]   # 你要检测的类别（比如0是癌细胞）
 UNET_INPUT_SIZE = (1024, 1024)   # 你原来用的就是480
 UNET_NUM_CLASSES = 1 + 1       # 背景 + 细胞（你原来num_classes=1）
 
-# 后处理参数（不开启）
-MASK_THRESHOLD = 0.9          # 降低阈值，让更多区域被识别（建议范围：0.1-0.2）
-USE_MORPHOLOGY = False         
-MORPH_KERNEL_SIZE = 5         
-USE_LARGEST_COMPONENT = False 
+# 后处理参数
+MASK_THRESHOLD = 0.9
 
 # 过滤参数（根据UNet结果过滤YOLO检测框）
 FILTER_BY_UNET = True          # 是否启用UNet过滤功能
@@ -230,42 +227,16 @@ def crop_and_prepare_patch(image_pil, bbox, expand_ratio=0.6):
 
 
 def unet_predict(patch_tensor, patch_idx, patch_for_debug):
-    """
-    改进版：添加形态学后处理，改善分割结果覆盖度
-    """
     global debug_dir
     with torch.no_grad():
-        output = unet_model(patch_tensor)              # [1, C, 480, 480]
-        pr = output[0]                                 # [C, 480, 480]
+        output = unet_model(patch_tensor)
+        pr = output[0]
 
-        # 正确且只写一次的softmax
-        pr = F.softmax(pr, dim=0).cpu().numpy()        # (C,480,480)
+        pr = F.softmax(pr, dim=0).cpu().numpy()
 
-        # 取前景通道（你训练时num_classes=1 → 输出2个通道）
-        prob_map = pr[1]                               # 直接取第2个通道
-        # print(np.max(prob_map))
-        # 使用更低的阈值，让更多区域被识别
+        prob_map = pr[1]
         mask_480 = (prob_map >= MASK_THRESHOLD).astype(np.uint8)
 
-        # 形态学后处理：填充空洞、连接断开的区域、平滑边界
-        if USE_MORPHOLOGY:
-            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE))
-            # 1. 闭运算：先膨胀后腐蚀，填充小空洞并连接断开的区域
-            mask_480 = cv2.morphologyEx(mask_480, cv2.MORPH_CLOSE, kernel, iterations=2)
-            # 2. 可选：轻微膨胀，确保边界完整（如果还是不够，可以增加iterations）
-            mask_480 = cv2.dilate(mask_480, kernel, iterations=1)
-            # 3. 再次闭运算，平滑边界
-            mask_480 = cv2.morphologyEx(mask_480, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-        # 连通域分析：只保留最大连通域（去除小噪声）
-        if USE_LARGEST_COMPONENT:
-            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask_480, connectivity=8)
-            if num_labels > 1:  # 至少有1个前景区域
-                # 找到面积最大的连通域（排除背景，背景标签是0）
-                largest_label = 1 + np.argmax(stats[1:, cv2.CC_STAT_AREA])
-                mask_480 = (labels == largest_label).astype(np.uint8)
-
-        # 强制创建调试文件夹并保存调试图像
         os.makedirs(debug_dir, exist_ok=True)
         cv2.imwrite(os.path.join(debug_dir, f"cell_{patch_idx:03d}_crop.jpg"),
                     cv2.cvtColor(patch_for_debug, cv2.COLOR_RGB2BGR))
@@ -273,10 +244,6 @@ def unet_predict(patch_tensor, patch_idx, patch_for_debug):
                     (np.clip(prob_map, 0, 1) * 255).astype(np.uint8))
         cv2.imwrite(os.path.join(debug_dir, f"cell_{patch_idx:03d}_mask_480.jpg"),
                     (mask_480 * 255).astype(np.uint8))
-        # 保存后处理后的mask（如果使用了形态学）
-        if USE_MORPHOLOGY:
-            cv2.imwrite(os.path.join(debug_dir, f"cell_{patch_idx:03d}_mask_morph.jpg"),
-                        (mask_480 * 255).astype(np.uint8))
 
         return mask_480
 
